@@ -43,7 +43,7 @@ def load_vector_db():
 @st.cache_resource
 def load_sentence_transformer():
     try:
-        return SentenceTransformer('sentence-transformers/all-MiniLM-L12-v2')
+        return SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
     except Exception as e:
         st.error(f"Error initializing sentence transformer: {str(e)}")
         return None
