@@ -16,9 +16,9 @@ st.set_page_config(
     layout="wide",
 )
 
-# Configuration constants
+# Configuration constants - read from environment variables with fallbacks
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-VECTOR_DB_PATH = "ocr_vector_db"
+VECTOR_DB_PATH = os.environ.get("VECTOR_DB_PATH", "ocr_vector_db")
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
 LLM_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
@@ -144,20 +144,34 @@ class FAISSVectorDB:
         instance = cls(model_name)
         
         try:
+            # Verify folder exists
+            if not os.path.exists(folder_path):
+                raise FileNotFoundError(f"Vector database folder not found at: {folder_path}")
+            
+            data_file = os.path.join(folder_path, "data.json")
+            index_file = os.path.join(folder_path, "index.faiss")
+            
+            # Check if files exist
+            if not os.path.exists(data_file):
+                raise FileNotFoundError(f"data.json not found in {folder_path}")
+                
+            if not os.path.exists(index_file):
+                raise FileNotFoundError(f"index.faiss not found in {folder_path}")
+            
             # Load chunks and metadata
-            with open(os.path.join(folder_path, "data.json"), "r", encoding="utf-8") as f:
+            with open(data_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 instance.chunks = data["chunks"]
                 instance.metadata = data["metadata"]
                 instance.dimension = data["dimension"]
             
             # Load FAISS index
-            instance.index = faiss.read_index(os.path.join(folder_path, "index.faiss"))
+            instance.index = faiss.read_index(index_file)
             
-            print(f"Loaded vector database from {folder_path} with {len(instance.chunks)} chunks")
+            print(f"Successfully loaded vector database from {folder_path} with {len(instance.chunks)} chunks")
             return instance
         except Exception as e:
-            print(f"Error loading vector database: {e}")
+            print(f"Error loading vector database from {folder_path}: {e}")
             raise
 
 # LLM processor using Groq API
@@ -229,36 +243,98 @@ def format_source_text(text: str, query_terms: List[str]) -> str:
     
     return formatted_text
 
+# Safe vector DB loading function with multiple fallback paths
+def load_vector_db_safely():
+    """
+    Attempt to load vector DB from various possible locations.
+    Returns tuple of (success, vector_db, error_message)
+    """
+    # List of possible paths to try (in order)
+    possible_paths = [
+        VECTOR_DB_PATH,  # Try environment variable path first
+        os.path.join(os.path.dirname(__file__), VECTOR_DB_PATH),  # Try relative to script
+        os.path.join(os.getcwd(), VECTOR_DB_PATH),  # Try relative to current directory
+        os.path.abspath(VECTOR_DB_PATH)  # Try absolute path
+    ]
+    
+    # Log paths being tried
+    print(f"Attempting to load vector DB from the following paths:")
+    for path in possible_paths:
+        print(f" - {path}")
+    
+    # Try each path
+    for path in possible_paths:
+        try:
+            print(f"Attempting to load vector DB from: {path}")
+            vector_db = FAISSVectorDB.load(path)
+            print(f"Successfully loaded vector DB from: {path}")
+            return True, vector_db, None
+        except Exception as e:
+            print(f"Failed to load from {path}: {str(e)}")
+            continue
+    
+    # If we get here, all paths failed
+    return False, None, f"Failed to load vector DB from any path. Check if the database exists and is accessible."
+
 # Initialize session state
 def init_session_state():
     """Initialize session state variables."""
-    if 'vector_db' not in st.session_state:
-        try:
-            st.session_state.vector_db = FAISSVectorDB.load(VECTOR_DB_PATH)
+    if 'vector_db' not in st.session_state or 'db_loaded' not in st.session_state:
+        # Attempt to load vector DB
+        is_loaded, vector_db, error_msg = load_vector_db_safely()
+        
+        if is_loaded:
+            st.session_state.vector_db = vector_db
             st.session_state.db_loaded = True
-        except Exception as e:
+        else:
             st.session_state.db_loaded = False
-            st.session_state.db_error = str(e)
+            st.session_state.db_error = error_msg or "Unknown error loading vector database"
     
     if 'llm_processor' not in st.session_state and GROQ_API_KEY:
-        st.session_state.llm_processor = LLMProcessor(GROQ_API_KEY)
-        st.session_state.llm_loaded = True
+        try:
+            st.session_state.llm_processor = LLMProcessor(GROQ_API_KEY)
+            st.session_state.llm_loaded = True
+        except Exception as e:
+            st.session_state.llm_loaded = False
+            st.session_state.llm_error = str(e)
     elif not GROQ_API_KEY:
         st.session_state.llm_loaded = False
+        st.session_state.llm_error = "No Groq API key provided"
 
 # Display database status
 def show_db_status():
     """Show database loading status."""
+    st.sidebar.subheader("System Status")
+    
+    # Vector DB status
     if st.session_state.get('db_loaded', False):
         st.sidebar.success("✅ Vector database loaded successfully")
         st.sidebar.info(f"Total entries: {len(st.session_state.vector_db.chunks)}")
+        st.sidebar.info(f"DB Path: {VECTOR_DB_PATH}")
     else:
-        st.sidebar.error(f"❌ Failed to load vector database: {st.session_state.get('db_error', 'Unknown error')}")
+        error_msg = st.session_state.get('db_error', 'Unknown error')
+        st.sidebar.error(f"❌ Failed to load vector database")
+        st.sidebar.error(f"Error: {error_msg}")
+        
+        # Add a button to retry loading
+        if st.sidebar.button("🔄 Retry loading database"):
+            # Clear the session state and retry
+            if 'vector_db' in st.session_state:
+                del st.session_state.vector_db
+            if 'db_loaded' in st.session_state:
+                del st.session_state.db_loaded
+            if 'db_error' in st.session_state:
+                del st.session_state.db_error
+            st.experimental_rerun()
     
+    # LLM status
     if st.session_state.get('llm_loaded', False):
         st.sidebar.success("✅ LLM processor initialized")
+        st.sidebar.info(f"Model: {LLM_MODEL}")
     else:
-        st.sidebar.error("❌ LLM processor not initialized. Please provide a valid Groq API key.")
+        error_msg = st.session_state.get('llm_error', 'Unknown error')
+        st.sidebar.error("❌ LLM processor not initialized")
+        st.sidebar.error(f"Error: {error_msg}")
 
 # Main search function
 def perform_search(query: str, top_k: int, distance_threshold: float):
@@ -268,24 +344,28 @@ def perform_search(query: str, top_k: int, distance_threshold: float):
     
     # Get search results
     start_time = time.time()
-    results = st.session_state.vector_db.search(query, k=top_k, threshold=distance_threshold)
-    search_time = time.time() - start_time
-    
-    # If results found and LLM is available, process with LLM
-    llm_answer = None
-    llm_time = 0
-    if results and st.session_state.get('llm_loaded', False):
-        start_time = time.time()
-        llm_answer = st.session_state.llm_processor.process_query(query, results)
-        llm_time = time.time() - start_time
-    
-    st.session_state.last_metrics = {
-        "search_time": search_time,
-        "llm_time": llm_time,
-        "results_count": len(results),
-    }
-    
-    return results, llm_answer
+    try:
+        results = st.session_state.vector_db.search(query, k=top_k, threshold=distance_threshold)
+        search_time = time.time() - start_time
+        
+        # If results found and LLM is available, process with LLM
+        llm_answer = None
+        llm_time = 0
+        if results and st.session_state.get('llm_loaded', False):
+            start_time = time.time()
+            llm_answer = st.session_state.llm_processor.process_query(query, results)
+            llm_time = time.time() - start_time
+        
+        st.session_state.last_metrics = {
+            "search_time": search_time,
+            "llm_time": llm_time,
+            "results_count": len(results),
+        }
+        
+        return results, llm_answer
+    except Exception as e:
+        st.error(f"Error during search: {str(e)}")
+        return [], None
 
 # Main application UI
 def main():
@@ -300,7 +380,31 @@ def main():
     st.sidebar.title("⚙️ Settings")
     show_db_status()
     
-    # Search parameters
+    # If database not loaded, show prominent error message
+    if not st.session_state.get('db_loaded', False):
+        st.error("⚠️ Vector database could not be loaded. Please check the sidebar for details and try the retry button.")
+        st.info(f"Looking for vector database at: {VECTOR_DB_PATH}")
+        st.info("Make sure the VECTOR_DB_PATH environment variable is set correctly or the database exists in the expected location.")
+        
+        # Manual path input option
+        manual_path = st.text_input("Or specify the vector database path manually:", 
+                                  value=VECTOR_DB_PATH)
+        if st.button("Try this path"):
+            try:
+                vector_db = FAISSVectorDB.load(manual_path)
+                st.session_state.vector_db = vector_db
+                st.session_state.db_loaded = True
+                if 'db_error' in st.session_state:
+                    del st.session_state.db_error
+                st.success(f"Successfully loaded vector database from {manual_path}!")
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Failed to load from {manual_path}: {str(e)}")
+        
+        # Exit early if no database
+        st.stop()
+    
+    # Search parameters (only show if DB is loaded)
     top_k = st.sidebar.slider("Number of similar documents to retrieve", 1, 10, 5)
     distance_threshold = st.sidebar.slider("Maximum distance threshold", 10.0, 200.0, 85.0)
     temperature = st.sidebar.slider("LLM Temperature", 0.0, 1.0, 0.1)
@@ -323,8 +427,9 @@ def main():
     st.markdown("</div>", unsafe_allow_html=True)
     
     # If search button is clicked
-    if search_button and query and st.session_state.get('db_loaded', False):
-        results, llm_answer = perform_search(query, top_k, distance_threshold)
+    if search_button and query:
+        with st.spinner("Searching and processing..."):
+            results, llm_answer = perform_search(query, top_k, distance_threshold)
         
         # Display results container
         st.markdown("<div class='result-container'>", unsafe_allow_html=True)
@@ -365,10 +470,6 @@ def main():
         
         st.markdown("</div>", unsafe_allow_html=True)
     
-    # Error messages if database or LLM is not loaded
-    elif search_button and not st.session_state.get('db_loaded', False):
-        st.error("Vector database is not loaded. Please check the sidebar for error details.")
-
     # Footer
     st.markdown("---")
     st.markdown("<div style='text-align: center; color: gray;'>தமிழ் ஜாதகம் உதவியாளர் © 2025</div>", unsafe_allow_html=True)
