@@ -332,7 +332,7 @@ with st.sidebar:
     # Clear chat history button
     if st.button("Clear Chat History"):
         st.session_state.messages = []
-        st.experimental_rerun()
+        st.rerun()
     
     st.markdown("---")
     st.caption("Tamil Astrology Book Assistant v1.0")
