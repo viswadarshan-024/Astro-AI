@@ -130,7 +130,7 @@ Important rules:
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=messages,
             temperature=0.1,
-            max_tokens=1000,
+            max_tokens=6000,
             top_p=0.9,
         )
         
