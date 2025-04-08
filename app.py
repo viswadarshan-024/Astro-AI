@@ -1,16 +1,54 @@
 import os
 import json
 import faiss
+import requests
 import numpy as np
 import streamlit as st
 from langchain.vectorstores import FAISS
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
-from langchain.chat_models import ChatGroq
+from langchain.llms.base import LLM
 from langchain.prompts import PromptTemplate
-from langchain.callbacks.manager import CallbackManager
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from typing import Any, List, Mapping, Optional
+
+# Custom LLM class for Groq API
+class GroqLLM(LLM):
+    groq_api_key: str
+    model_name: str = "llama-3.1-70b-versatile"  # Llama 4 model on Groq
+    
+    @property
+    def _llm_type(self) -> str:
+        return "groq"
+    
+    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.groq_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+        }
+        
+        if stop:
+            data["stop"] = stop
+            
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=data
+        )
+        
+        if response.status_code != 200:
+            raise ValueError(f"Error from Groq API: {response.text}")
+            
+        return response.json()["choices"][0]["message"]["content"]
+    
+    def _identifying_params(self) -> Mapping[str, Any]:
+        return {"model_name": self.model_name}
 
 # Setting page configuration
 st.set_page_config(
@@ -87,6 +125,7 @@ with st.sidebar:
     st.markdown("""
     This application uses Tamil astrology texts stored in a vector database.
     It provides answers based on the content of these texts as well as general knowledge.
+    Using Llama 4 through Groq API.
     """)
 
 # Function to load the vector store
@@ -115,10 +154,9 @@ def setup_conversation_chain(groq_api_key):
             return None
         
         # Set up the Groq LLM with Llama 4
-        llm = ChatGroq(
+        llm = GroqLLM(
             groq_api_key=groq_api_key,
-            model_name="llama-3.1-70b-versatile",  # Using Llama 4 (via Groq's naming)
-            streaming=True
+            model_name="llama-3.1-70b-versatile"  # Llama 4 model on Groq
         )
         
         # Create memory for conversation context
@@ -157,8 +195,7 @@ def setup_conversation_chain(groq_api_key):
             retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
             memory=memory,
             combine_docs_chain_kwargs={"prompt": PROMPT},
-            return_source_documents=True,
-            verbose=True
+            return_source_documents=True
         )
         
         return conversation_chain
@@ -198,9 +235,12 @@ def process_user_input(user_input):
                     response = "Hello! I am your Tamil Astrology Assistant. How can I help you today?"
             else:
                 if st.session_state.conversation:
-                    # Get response from conversation chain
-                    result = st.session_state.conversation({"question": user_input})
-                    response = result["answer"]
+                    try:
+                        # Get response from conversation chain
+                        result = st.session_state.conversation({"question": user_input})
+                        response = result["answer"]
+                    except Exception as e:
+                        response = f"Sorry, I encountered an error: {str(e)}"
                 else:
                     response = "I'm having trouble connecting to the knowledge base. Please make sure the API key is correct."
             
@@ -214,7 +254,7 @@ def main():
     
     # Initialize conversation chain if API key is provided
     if groq_api_key and not st.session_state.conversation:
-        with st.spinner("Initializing the Tamil Astrology Assistant..."):
+        with st.spinner("Initializing the Tamil Astrology Assistant with Llama 4..."):
             st.session_state.conversation = setup_conversation_chain(groq_api_key)
             if not st.session_state.conversation:
                 st.error("Failed to initialize the conversation chain. Please check your API key and try again.")
