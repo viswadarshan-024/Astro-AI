@@ -6,3 +6,4 @@ torch
 transformers 
 groq
 langchain
+langchain-community
